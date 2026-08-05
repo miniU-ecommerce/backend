@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 from httpx import AsyncClient
+from re import sub
 
 from DEPENDENCIES import verificar_token, pegar_sessao
 from MODELS import Usuarios, Enderecos
@@ -11,7 +12,7 @@ from SCHEMAS.address_schema import EnderecoCompleto, EnderecoResponse, EnderecoC
 user_router = APIRouter(prefix="/user", tags=["Usuarios"])
 
 
-@user_router.get("/profile", response_model=UserResponse)
+@user_router.get("/", response_model=UserResponse)
 async def buscar_informacoes_usuario(db: Session = Depends(pegar_sessao), usuario: Usuarios = Depends(verificar_token)):
     info_usuario = (
         db.query(Usuarios)
@@ -25,18 +26,32 @@ async def buscar_informacoes_usuario(db: Session = Depends(pegar_sessao), usuari
     return info_usuario
 
 
-@user_router.post("/adicionar-endereco", response_model=EnderecoResponse)
+@user_router.post("/endereco", response_model=EnderecoResponse)
 async def adicionar_endereco_usuario(endereco_schema: EnderecoCompleto, db: Session = Depends(pegar_sessao), usuario: Usuarios = Depends(verificar_token)):
-    id_usuario = usuario.id_usuario
+    # Garatindo que o cep tenha o formato correto, apenas números.
+    cep_normalizado = sub(r"\D", "", endereco_schema.cep)
+    
+    endereco = (
+        db.query(Enderecos)
+        .filter(Enderecos.id_usuario==usuario.id_usuario)
+        .filter(
+            Enderecos.cep==cep_normalizado,
+            Enderecos.numero==endereco_schema.numero
+        )
+        .first()
+    )
+    
+    if endereco:
+        raise HTTPException(status_code=400, detail="Endereço já existe para esse usuário.")
     
     novo_endereco = Enderecos(
-        id_usuario=id_usuario,
+        id_usuario=usuario.id_usuario,
         rua=endereco_schema.rua,
         bairro=endereco_schema.bairro,
         estado=endereco_schema.estado,
         numero=endereco_schema.numero,
         complemento=endereco_schema.complemento,
-        cep=endereco_schema.cep
+        cep=cep_normalizado
     )
     
     db.add(novo_endereco)
@@ -46,9 +61,41 @@ async def adicionar_endereco_usuario(endereco_schema: EnderecoCompleto, db: Sess
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=400, detail="Não foi possível cadastrar o endereço.")
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Erro inesperado.")
     
     db.refresh(novo_endereco)
     return novo_endereco
+
+
+@user_router.delete("/endereco/{id_endereco}", status_code=status.HTTP_204_NO_CONTENT)
+async def deletar_endereco_usuario(
+    id_endereco: int,
+    db: Session = Depends(pegar_sessao),
+    usuario: Usuarios = Depends(verificar_token)
+):
+    endereco = (
+        db.query(Enderecos)
+        .filter(
+            Enderecos.id_endereco == id_endereco,
+            Enderecos.id_usuario == usuario.id_usuario
+        )
+        .first()
+    )
+
+    if not endereco:
+        raise HTTPException(status_code=404, detail="Endereço não encontrado.")
+
+    db.delete(endereco)
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Erro inesperado ao deletar o endereço.")
+
+    return None
 
 
 @user_router.get("/cep/{cep}", response_model=EnderecoCepResponse)
